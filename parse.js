@@ -195,6 +195,15 @@ function leadIndent(s) {
   return { col, idx: i };
 }
 
+// Remove up to n leading whitespace characters (marked's Dt for fence
+// dedent slices min(leadingWsLen, fenceIndentLen) characters, counting
+// a tab as one character, not as its column width).
+function stripIndentChars(s, n) {
+  let k = 0;
+  while (k < s.length && k < n && (s[k] === ' ' || s[k] === '\t')) k++;
+  return s.slice(k);
+}
+
 // Remove n virtual columns from the start of s. A tab straddling the cut
 // becomes spaces for the remainder of the tab.
 function stripCols(s, n) {
@@ -469,6 +478,76 @@ function stripQuote(line) {
 }
 
 // ---- link reference definitions ----
+
+// Match a bracket unit starting at text[j] === '[' (marked's `brackets`
+// regex, applied recursively for nesting): '[' + (escape | nested unit |
+// non-bracket char)* + ']'. Returns the index just past ']' or -1.
+function matchBracketUnit(text, j) {
+  const n = text.length;
+  let k = j + 1;
+  while (k < n) {
+    const c = text[k];
+    if (c === '\\' && k + 1 < n) { k += 2; continue; }
+    if (c === '[') {
+      const u = matchBracketUnit(text, k);
+      if (u < 0) return -1;
+      k = u;
+      continue;
+    }
+    if (c === ']') return k + 1;
+    k++;
+  }
+  return -1;
+}
+
+// Find the end of a link label starting at text[i] === '[', mirroring
+// marked's label regex `re`:
+//   (?:\[(?:brackets|\\[\s\S]|[^[\]\\])*?\]|\\[\s\S]
+//     |`+(?!`)[^`]*?`+(?!`)|``+(?=\])|[^\[\]\\`])*?
+// Returns the index of the ']' that ends the label, or -1 when the label
+// is invalid (an unmatched backtick, a '[' that is not a bracket unit,
+// no ']', or a label longer than 999 chars). A code span inside a label
+// needs an opener run + non-backtick content + a closer run (the two runs
+// may differ in length); a run of 2+ backticks immediately before ']' is
+// also allowed. When the label is invalid, marked forms no link.
+function scanLabelEnd(text, i) {
+  const n = text.length;
+  let j = i + 1;
+  while (j < n) {
+    const c = text[j];
+    if (c === '\\' && j + 1 < n && isPunctAscii(text[j + 1])) { j += 2; continue; }
+    if (c === '[') {
+      const u = matchBracketUnit(text, j);
+      if (u < 0) return -1;
+      j = u;
+      continue;
+    }
+    if (c === '`') {
+      let m = 0;
+      while (j + m < n && text[j + m] === '`') m++;
+      // Trailing run of 2+ backticks immediately before ']'.
+      if (m >= 2 && j + m < n && text[j + m] === ']') { j += m; continue; }
+      // Code-span unit: opener run, non-backtick content, closer run.
+      let k = j + m;
+      let close = -1;
+      while (k < n) {
+        if (text[k] === '`') { close = k; break; }
+        k++;
+      }
+      if (close < 0) return -1;
+      let r = 0;
+      while (close + r < n && text[close + r] === '`') r++;
+      j = close + r;
+      continue;
+    }
+    if (c === ']') {
+      if (j - i - 1 > 999) return -1;
+      return j;
+    }
+    j++;
+  }
+  return -1;
+}
 
 // Scan a label starting at text[i] === '['. Returns {label, end} (end is
 // the index just past ']') or null.
@@ -811,7 +890,11 @@ function parseBlocks(lines, refs, inListItem, inContainer, docEndsNL, lazy) {
         const l2 = lines[j];
         const ind2 = leadIndent(l2);
         if (ind2.col <= 3 && isClosingFence(l2.slice(ind2.idx), fence)) { j++; break; }
-        clines.push(stripCols(l2, ind.col));
+        // marked's indentCodeCompensation is /^(\s+)(?:```)/ — backtick
+        // fences only. A ~~~ fence never dedents its content lines.
+        // The dedent is character-based (Dt slices up to the fence
+        // indent's character count), so a tab counts as one.
+        clines.push(fence.ch === '`' ? stripIndentChars(l2, ind.idx) : l2);
         j++;
       }
       out.push({ t: 'code', info: fence.info, text: clines.length ? clines.join('\n') + (clines[clines.length - 1] === '' ? '' : '\n') : '', fenced: true });
@@ -1047,7 +1130,12 @@ function parseParagraph(lines, i, refs, inListItem, firstStrip, lazy, docEndsNL)
     if (lazy && lazy.has(j)) { plines.push(line); lastRawIndent = ind.col; j++; continue; }
     if (ind.col >= 4) { plines.push(line); lastRawIndent = ind.col; j++; continue; }
     const s = raw.slice(ind.idx);
-    const st = matchSetext(s);
+    // Once a header + delimiter row are collected, later lines are table
+    // body rows — a setext-looking line (e.g. =========) is a row, not a
+    // heading underline (marked's table body only excludes blank/hr/
+    // heading/blockquote/code/fences/list/html lines).
+    const inTable = plines.length >= 2 && isDelimiterRow(plines[1]);
+    const st = inTable ? 0 : matchSetext(s);
     if (st && plines.length > 0) {
       if (hasNonDefContent(plines, refs)) { setext = st; j++; break; }
       break;
@@ -1511,6 +1599,10 @@ function scanInline(s, refs) {
   const nodes = [];
   const stack = []; // {nodeIdx, img, active, srcIdx}
   let buf = '';
+  // Whether an unmatched '_' opener stands anywhere before the current
+  // position (a delimiter node that can open). Maintained incrementally
+  // instead of rescanning nodes for every word (was O(n^2)).
+  let hasOpenUnderscore = false;
   const flush = () => { if (buf) { nodes.push({ t: 'txt', s: buf }); buf = ''; } };
   const n = s.length;
   let i = 0;
@@ -1531,9 +1623,14 @@ function scanInline(s, refs) {
         // Whether an unmatched '_' opener stands before this position
         // (a delimiter node that can open): a trailing '_' after an
         // email is then its closing delimiter, not a word character.
-        let openUnderscore = false;
-        for (const nd of nodes) if (nd.t === 'd' && nd.ch === '_' && nd.canOpen) { openUnderscore = true; break; }
-        if (!m && isAlpha(ch)) m = tryScheme(s, i, openUnderscore);
+        const openUnderscore = hasOpenUnderscore;
+        // Fast guards: a scheme needs ':' within the next 32 chars and
+        // an email needs '@' within the next 64; without them the
+        // forward scans walk the whole word for nothing.
+        if (!m && isAlpha(ch)) {
+          const ci = s.indexOf(':', i);
+          if (ci !== -1 && ci - i <= 32) m = tryScheme(s, i, openUnderscore);
+        }
         // An email is not attempted mid-word (prev char an email-local
         // char), but a delimiter just consumed as a token (e.g. the __
         // of __...__) is a token boundary, not part of the word: buf is
@@ -1541,7 +1638,10 @@ function scanInline(s, refs) {
         // An email never starts with '__': that is a strong delimiter,
         // not part of the local part (a single leading '_' is).
         if (!m && isBareEmailLocal(ch) && !(ch === '_' && s[i + 1] === '_') &&
-            (i === 0 || buf === '' || !isBareEmailLocal(s[i - 1]))) m = tryEmail(s, i, openUnderscore);
+            (i === 0 || buf === '' || !isBareEmailLocal(s[i - 1]))) {
+          const ai = s.indexOf('@', i);
+          if (ai !== -1 && ai - i <= 64) m = tryEmail(s, i, openUnderscore);
+        }
         if (m) {
           flush();
           nodes.push({ t: 'xlink', href: m.href, label: escAttr(m.text) });
@@ -1579,13 +1679,19 @@ function scanInline(s, refs) {
     if (ch === '`') {
       let m = 0;
       while (i + m < n && s[i + m] === '`') m++;
+      // Inside a link label, a code span may only close within the
+      // label (marked's label regex): bound the closer search to the
+      // label end, so a backtick cannot swallow the ']' and the
+      // destination. When the label is invalid there is no bound.
+      const topFrame = stack.length > 0 && stack[stack.length - 1].active ? stack[stack.length - 1] : null;
+      const spanLimit = topFrame && topFrame.labelEnd >= 0 ? topFrame.labelEnd : n;
       // find a run of exactly m backticks
       let j = i + m;
       let close = -1;
-      while (j < n) {
+      while (j < spanLimit) {
         if (s[j] === '`') {
           let r = 0;
-          while (j + r < n && s[j + r] === '`') r++;
+          while (j + r < spanLimit && s[j + r] === '`') r++;
           if (r === m) { close = j; break; }
           j += r;
           continue;
@@ -1621,6 +1727,7 @@ function scanInline(s, refs) {
       }
       flush();
       nodes.push({ t: 'd', ch, len: m, canOpen, canClose });
+      if (ch === '_' && canOpen) hasOpenUnderscore = true;
       i += m;
       continue;
     }
@@ -1628,7 +1735,11 @@ function scanInline(s, refs) {
       const img = ch === '!';
       flush();
       nodes.push({ t: 'open', img, href: null, title: null });
-      stack.push({ nodeIdx: nodes.length - 1, img, active: true, srcIdx: i });
+      // The label end per marked's label regex (scanLabelEnd): a code
+      // span inside the label may only close within it, and a label
+      // with an unmatched backtick forms no link.
+      const labelEnd = scanLabelEnd(s, img ? i + 1 : i);
+      stack.push({ nodeIdx: nodes.length - 1, img, active: true, srcIdx: i, labelEnd });
       i += img ? 2 : 1;
       continue;
     }
@@ -1637,10 +1748,35 @@ function scanInline(s, refs) {
       const top = stack[stack.length - 1];
       if (!top.active) { stack.pop(); buf += ']'; i++; continue; }
       const openerNode = nodes[top.nodeIdx];
+      // A label that is invalid per marked's label regex (scanLabelEnd)
+      // forms no link at all, and this ']' is not its end either.
+      // When an inline/ref link follows such a label, marked also
+      // suppresses emphasis inside the would-be label (the failed link
+      // attempt leaves its text literal for emphasis); without a
+      // following '(' or '[', emphasis inside still forms.
+      if (top.labelEnd < 0) {
+        if (s[i + 1] === '(' || s[i + 1] === '[') {
+          for (let k = top.nodeIdx + 1; k < nodes.length; k++) {
+            if (nodes[k].t === 'd') nodes[k].noEm = true;
+          }
+        }
+        stack.pop();
+        buf += ']';
+        i++;
+        continue;
+      }
+      if (i !== top.labelEnd) {
+        stack.pop();
+        buf += ']';
+        i++;
+        continue;
+      }
       let formed = null;
       // A [label] after ] that parses syntactically blocks the shortcut
       // even when the label is undefined (cm-571); a failed inline link
-      // does not block it (cm-568).
+      // does not block it (cm-568). The block only applies when this
+      // label itself is valid — an invalid label leaves the [ref]
+      // shortcut to form (doc-18's [all-40]).
       let refLabelParsed = false;
       if (s[i + 1] === '(') formed = parseInlineLink(s, i + 1);
       if (!formed && s[i + 1] === '[') {
@@ -1789,7 +1925,7 @@ function processEmphasis(nodes) {
     else if ((nd.t === 'em' || nd.t === 'strong' || nd.t === 'strike') && nd.children) processEmphasis(nd.children);
   }
   const delims = [];
-  for (const nd of nodes) if (nd.t === 'd') delims.push(nd);
+  for (const nd of nodes) if (nd.t === 'd' && !nd.noEm) delims.push(nd);
   let di = 0;
   while (di < delims.length) {
     const closer = delims[di];
@@ -1817,14 +1953,52 @@ function processEmphasis(nodes) {
       // ("*a **b**c*" stays literal, "*a **b** c*" forms <em>). The
       // flags are recorded on the strong node for this check.
       if (use === 1 && closer.ch === '*' && isBlockedByStrong(middle)) continue;
+      // marked's m/f accounting: a lone * closer must not steal a **
+      // opener when the middle holds an em whose closer is a "both"
+      // delimiter and a later ** closer can close the opener instead
+      // ("**public as *so*other* option html**" — the lone * before
+      // "option" stays inside the strong closed by the final **).
+      if (use === 1 && opener.len === 2 && closer.len === 1 && closer.ch === '*') {
+        let hasBothEm = false;
+        for (const nd of middle) if (nd.t === 'em' && nd.cBoth) { hasBothEm = true; break; }
+        if (hasBothEm) {
+          let laterStrong = false;
+          for (let k = di + 1; k < delims.length; k++) {
+            const nd = delims[k];
+            if (nd.ch === '*' && nd.len >= 2 && nd.canClose) { laterStrong = true; break; }
+          }
+          if (laterStrong) continue;
+        }
+      }
+      // marked's m/f accounting: when the middle contains an em whose
+      // closer is a "both" delimiter (followed by a non-space, e.g.
+      // "*b*" in "**a *b*c***"), the outer strong consumes the FULL
+      // closer run and the leftover delimiters land INSIDE the strong
+      // ("<strong>a <em>b</em>c*</strong>"), not outside ("**foo***"
+      // with no such inner em keeps the leftover outside). Record the
+      // closer's both-ness on every em/strong node for this check.
+      let consume = use;
+      let leftoverInside = null;
+      if (tag === 'strong' && closer.len > use && closer.ch === '*') {
+        let hasBothEm = false;
+        for (const nd of middle) {
+          if (nd.t === 'em' && nd.cBoth) { hasBothEm = true; break; }
+        }
+        if (hasBothEm) {
+          consume = closer.len;
+          leftoverInside = { t: 'd', ch: '*', len: closer.len - use, canOpen: false, canClose: false };
+        }
+      }
       const strongNode = { t: tag, children: middle };
+      if (leftoverInside) strongNode.children.push(leftoverInside);
+      strongNode.cBoth = closer.canOpen && closer.canClose;
       if (tag === 'strong' && closer.ch === '*') {
         strongNode.oo = opener.canOpen && !opener.canClose;
         strongNode.ca = closer.canOpen && closer.canClose;
       }
       nodes.splice(oiIdx + 1, ciIdx - oiIdx - 1, strongNode);
       opener.len -= use;
-      closer.len -= use;
+      closer.len -= consume;
       if (opener.len === 0) {
         const idx = nodes.indexOf(opener);
         if (idx >= 0) nodes.splice(idx, 1);
