@@ -9,25 +9,28 @@ rewritten by hand in a fresh recorded session after the round-1 entry
 was rejected on provenance (not quality), so every counted line is
 authored in that session.
 
-Round-4 (in progress): continued by hand in the same recorded session
-toward 720/720 — document-level `inLink` (an open `<a ` tag suppresses
-bare-URL autolinks until `</a>`), lenient link-label code-span closes,
-the deferred emphasis leftover (first pairing's b' applied after the
-whole closer's pairings), nested HTML trailing newlines, indented code
-lines absorbed into a list-item paragraph, ref-def-only paragraphs,
-dirty-span checks on full/collapsed reference links, and the emStrong
-mask (marked's Ot + blockSkip, consulted only by the top-level emphasis
-scan). Grade 719/720 at last check; spec fails none. One doc left:
-doc-39 (a bare URL in a link label whose outer reference does not
-resolve — the label gating suppresses it; lifting the gating breaks
-the label-end finding in other docs).
+Round-5 (done): reached 720/720 by hand in the same recorded session.
+A bare URL/email inside a link label is now allowed only when no
+containing label can resolve — `labelCanForm` mirrors `tryLink`'s
+decision (label end, inline dest, reference lookup, dirty-span bail),
+and a greedy URL pops any opener whose closer it ate, so a later `]`
+cannot resurrect the dead label. A blank line is no longer absorbed
+into a paragraph that is so far only reference definitions, so a split
+ref def inside a list item cannot swallow the paragraph after it. A
+removed ref-def paragraph still counts toward list looseness when it
+followed a blank line inside an item. Grade 720/720, spec fails none.
+Speed is now the open item: ~0.81–0.99x vs marked across runs, and the
+live top-10 line sits near 0.71x.
 
 A fast, dependency-free CommonMark 0.31.2 + GFM renderer whose output is
 byte-identical to marked 18.1.3 with default options (GFM on, breaks off).
-Round-4 grade 719/720, speed ~0.81x vs marked (the emStrong mask adds
-regex cost on paragraphs holding both a backtick and an emphasis
-delimiter; without it the same build is ~0.72x but drops to 715/720).
-Written from scratch for the make.fun `markdown-render-speed-02` bounty.
+Round-5 grade 720/720, spec fails none. Speed is the open item: the
+local ratio vs marked moves with machine load (0.74–0.86x on a quiet
+box, noisier under contention), and the live top-10 line sits near
+0.71x. The per-opener `labelCanForm` cache (static label resolution
+cached; only the already-holds-a-link check re-run) keeps the in-label
+bare-URL probes cheap. Written from scratch for the make.fun
+`markdown-render-speed-02` bounty.
 
 ## Layout
 

@@ -877,13 +877,19 @@ function processBlankLine(st, raw) {
   // A second blank in a row still ends it (marked's space token is
   // then `\n\n`, not a single `\n`). No quote may be open (a blank
   // line closes blockquotes), and the list stays tight.
+  // Round 5: the exception does not apply to a paragraph that is so
+  // far only reference definitions — a def is a `def` token, not a
+  // text line that merges as indented code, so the blank ends the
+  // def paragraph (doc-39: a split ref def inside a list item must
+  // not swallow the following unindented paragraph).
   const top = stackTop(st);
   if (
     top.t === 'para' &&
     top.hasIndentedLine &&
     !top.blankAbsorbed &&
     inListItem(st, top) &&
-    !st.stack.some((n) => n.t === 'quote')
+    !st.stack.some((n) => n.t === 'quote') &&
+    refDefRunEnd(top.lines) < top.lines.length
   ) {
     top.lines.push('');
     top.blankAbsorbed = true;
@@ -1745,7 +1751,16 @@ function finalizeParagraph(st, para) {
     // The whole paragraph was reference definitions: remove it.
     const parent = stackTop(st);
     if (parent && parent.children) {
+      // Round 5: the removed paragraph still counts as a block for
+      // looseness — when it followed a blank line inside a list item
+      // that holds other blocks, the item held two blocks separated
+      // by a blank line, so the list is loose even though the def
+      // renders nothing. A def first in the item, or with no blank
+      // before it, does not loosen it.
       const idx = parent.children.indexOf(para);
+      if (parent.t === 'item' && para.blankBefore && idx > 0) {
+        parent.looseByRefDef = true;
+      }
       if (idx !== -1) parent.children.splice(idx, 1);
     }
     para.lines = [];
@@ -1965,6 +1980,10 @@ function resolveLooseLists(node) {
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       if (item.blankAfter && i + 1 < items.length) loose = true;
+      // Round 5: a removed ref-def paragraph after a blank line
+      // inside this item (see finalizeParagraph) still counts as a
+      // second block separated by a blank line.
+      if (item.looseByRefDef) loose = true;
       // Two block children separated by a blank line inside the item.
       if (item.children && item.children.length > 1) {
         for (let k = 1; k < item.children.length; k++) {
@@ -3052,6 +3071,95 @@ function labelBlocksOuterLink(S) {
   return false;
 }
 
+// Round 5: the source index of the ']' that closes opener `op`'s
+// label (or -1). Mirrors tryLink: the toggle scan wins unless the
+// proper scan disagrees, in which case the proper end is the closer.
+function labelEndFor(S, op) {
+  const src = S.src;
+  const labelStart = op.at + 1;
+  const t = findLabelEndToggle(src, labelStart);
+  const p = findLabelEndProper(src, labelStart);
+  if (t === -1) return p;
+  if (p !== -1 && p !== t) return p;
+  return t;
+}
+
+// Round 5: will opener `op`'s label resolve into a link (or image)
+// when its closer is reached? This mirrors tryLink's decision, so a
+// bare URL/email inside the label can be allowed only when the answer
+// is no for every containing label. A label that already holds a
+// formed link cannot form (tryLink pops it); a dirty code span
+// mid-label blocks the inline/reference paths exactly as tryLink
+// does. Conservative by design: when in doubt it says the label can
+// form, which only keeps a URL as plain text.
+// The static resolution (label end, suffix, reference) depends only
+// on the source text and the ref map, both fixed while the paragraph
+// is scanned, so it is cached on the opener (`op.canForm`); only the
+// already-holds-a-link check is re-run per call, since links can form
+// inside the label as scanning proceeds.
+function labelCanForm(S, op) {
+  if (!op.img) {
+    for (let pi = op.start; pi < S.parts.length; pi++) {
+      if (S.parts[pi].k === 'a') return false;
+    }
+  }
+  if (op.canForm === undefined) op.canForm = labelCanFormStatic(S, op);
+  return op.canForm;
+}
+
+function labelCanFormStatic(S, op) {
+  const src = S.src;
+  const n = src.length;
+  const end = labelEndFor(S, op);
+  if (end === -1) return false;
+  const labelStart = op.at + 1;
+  const after = end + 1;
+  const lookup = (labelSrc) => {
+    const key = normalizeLabel(decodeForLabel(labelSrc));
+    return key !== '' && S.refs.get(key) != null;
+  };
+  if (after < n && src.charCodeAt(after) === 40) {
+    if (labelHasDirtySpanNotAtEnd(src, labelStart, end)) return false;
+    if (parseInlineDest(src, after)) return true;
+    return lookup(src.slice(labelStart, end));
+  }
+  if (after < n && src.charCodeAt(after) === 91) {
+    if (labelHasDirtySpanNotAtEnd(src, labelStart, end)) return false;
+    const secondEnd = findLabelEndProper(src, after + 1);
+    if (secondEnd !== -1) {
+      const secondLabel = src.slice(after + 1, secondEnd);
+      return lookup(secondLabel === '' ? src.slice(labelStart, end) : secondLabel);
+    }
+    return lookup(src.slice(labelStart, end));
+  }
+  return lookup(src.slice(labelStart, end));
+}
+
+// Round 5: does any open label containing the current position resolve
+// into a link/image? If yes, a bare URL/email here must stay plain
+// text (marked lexes the label with autolinks off, and build() mutes
+// any tentative 'u' part inside a formed link). If none resolves, the
+// URL/email is a real autolink — marked's link tokenizer already
+// failed on the label, so it lexes greedily.
+function openLabelCanForm(S) {
+  for (let i = S.opens.length - 1; i >= 0; i--) {
+    if (labelCanForm(S, S.opens[i])) return true;
+  }
+  return false;
+}
+
+// Round 5: a greedy bare URL that ran past a label's closer killed
+// that label — marked's link tokenizer had already failed on it, so
+// the opener is dead and must not be resurrected by a later ']'.
+function popEatenOpeners(S) {
+  while (S.opens.length > 0) {
+    const op = S.opens[S.opens.length - 1];
+    const end = labelEndFor(S, op);
+    if (end !== -1 && end < S.pos) S.opens.pop();
+    else break;
+  }
+}
+
 // '@' at S.pos: a bare email autolink (local part is behind us).
 // The local part is read from the SOURCE text before '@': a backslash
 // escape breaks it (e.g. `foo\+@bar.example.com` forms no link), so the
@@ -3062,8 +3170,10 @@ function tryEmail(S) {
   if (docInLink) return false;
   // Inside a link label that can still form, a bare email is plain
   // text (the label closer must stay available for the outer link).
-  // See tryBareUrl: the gating stays; doc-39 is a known casualty.
-  if (S.opens.length > 0 && !labelBlocksOuterLink(S)) return false;
+  // Round 5: only when some containing label can actually form —
+  // when none can (the reference does not resolve), the email is a
+  // real autolink, exactly as marked lexes it.
+  if (S.opens.length > 0 && !labelBlocksOuterLink(S) && openLabelCanForm(S)) return false;
   const src = S.src;
   // Domain: marked's bare-email pattern (labels may hold '_' and '-',
   // at least one dot, last char alnum).
@@ -3218,11 +3328,12 @@ function tryBareUrl(S) {
   if (docInLink) return false;
   // Inside a link label that can still form, a bare URL is plain
   // text (the label closer must stay available for the outer link).
-  // build() sets inner 'u' parts live=false when the outer link
-  // forms, but letting the URL form here breaks the label-end
-  // finding in many docs; the gating stays. (doc-39, where the
-  // outer reference does not resolve, is a known casualty.)
-  if (S.opens.length > 0 && !labelBlocksOuterLink(S)) return false;
+  // Round 5: only when some containing label can actually form.
+  // When none can (the reference does not resolve), the URL is a
+  // real autolink: marked's link tokenizer already failed on the
+  // label, so it lexes the URL greedily — build() still mutes the
+  // tentative 'u' part if a later ']' forms a link around it.
+  if (S.opens.length > 0 && !labelBlocksOuterLink(S) && openLabelCanForm(S)) return false;
   const src = S.src;
   const n = src.length;
   if (S.pos > 0 && isAlnumCode(src.charCodeAt(S.pos - 1))) return false;
@@ -3251,6 +3362,7 @@ function tryBareUrl(S) {
     const href = 'http://' + url;
     pushPart(S, { k: 'u', href, text: url, live: true });
     S.pos = S.pos + url.length;
+    popEatenOpeners(S);
     return true;
   }
   const m = /^[A-Za-z][A-Za-z0-9+.-]{1,31}:/.exec(src.slice(S.pos));
@@ -3290,6 +3402,7 @@ function tryBareUrl(S) {
     if (url.length <= m[0].length) return false;
     pushPart(S, { k: 'u', href: url, text: url, live: true });
     S.pos = S.pos + url.length;
+    popEatenOpeners(S);
     return true;
   }
   // A bare scheme URL is only http://, https:// or ftp:// (marked's
@@ -3312,6 +3425,7 @@ function tryBareUrl(S) {
   if (url.length <= m[0].length) return false;
   pushPart(S, { k: 'u', href: url, text: url, live: true });
   S.pos = S.pos + url.length;
+  popEatenOpeners(S);
   return true;
 }
 
