@@ -1595,6 +1595,65 @@ function parseInlineLink(s, i) {
   return null;
 }
 
+// ---- marked 18.1.3 emStrong/del masking (regexes from marked's
+// rules.inline.gfm; literals copied verbatim from the 18.1.3 build) ----
+const MASK_REFLINK_SEARCH = /!?\[((?:[^\[\]\\`]*(?:\[(?:\[(?:\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|`+(?!`)[^`]*?`+(?!`)|``+(?=\]))){0,999}?[^\[\]\\`]*?)\]\[((?!\s*\])(?:\\[\s\S]|[^\[\]\\]){1,999})\]|!?\[((?!\s*\])(?:\\[\s\S]|[^\[\]\\]){1,999})\](?:\[\])?(?!\()/g;
+const MASK_ANY_PUNCT_OUTSIDE_CODE = /(`+)(?:[^`]|[^`][\s\S]*?[^`])\1(?!`)|`+|\\([\p{P}\p{S}])/gu;
+const MASK_BLOCK_SKIP = /\[(?:[^\[\]`]|(?<a>`+)[^`]+\k<a>(?!`))*?\]\((?:\\[\s\S]|[^\\\(\)]|\((?:\\[\s\S]|[^\\\(\)])*\))*\)|(?<!`)()(?<b>`+)[^`]+\k<b>(?!`)|<(?! )[^<>]*?>/g;
+const MASK_INLINE_LINK = /^!?\[((?:\[(?:\[(?:\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|`+(?!`)[^`]*?`+(?!`)|``+(?=\])|[^\[\]\\`])*?)\]\([ \t\n]*(<(?:\\.|[^\n<>\\])+>|[^ \t\n\x00-\x1f]+|(?=\)))(?:(?:[ \t]+(?:\n[ \t]*)?|\n[ \t]*)("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\((?:\\[\s\S]|[^)\\])*\)))?[ \t\n]*\)/;
+
+// marked's linkInText: does `text` hold a link (inline or reference)?
+// Used by the mask: a reflink whose text holds a link masks the inner
+// links instead of flattening the whole span.
+function linkInTextMask(text, refs) {
+  if (!text.includes('[')) return false;
+  for (const m of text.matchAll(MASK_BLOCK_SKIP)) {
+    if (MASK_INLINE_LINK.test(m[0]) && text.charAt(m.index - 1) !== '!') return true;
+  }
+  for (const m of text.matchAll(MASK_REFLINK_SEARCH)) {
+    const s = m[0], r = s.lastIndexOf('[');
+    if (!(s.charAt(0) === '!' || !refs.has(normalizeLabel(s.slice(r + 1, -1)))) &&
+        !(r > 1 && linkInTextMask(s.slice(1, r - 1), refs))) return true;
+  }
+  return false;
+}
+
+// marked's maskText (Lexer.ts): replace maskable regions of `src` with
+// '[aaa...]' of the same length, so emphasis only sees delimiters
+// outside them. Steps, in marked's order: (1) defined reflinks,
+// (2) code spans / escapes, (3) inline links / code spans / HTML.
+// A mask can only hide a delimiter when the source holds a backtick, a
+// '[' or a '<'; otherwise it is returned unchanged (cheap guard).
+function maskInlineSrc(src, refs) {
+  if (src.indexOf('`') < 0 && src.indexOf('[') < 0 && src.indexOf('<') < 0) return src;
+  let masked = src;
+  if (refs && refs.size > 0 && src.includes('[')) {
+    const maskReflink = (m) => {
+      const refStart = m.lastIndexOf('[');
+      if (!refs.has(normalizeLabel(m.slice(refStart + 1, -1)))) return m;
+      if (refStart > 1 && m.charAt(0) !== '!') {
+        const text = m.slice(1, refStart - 1);
+        if (linkInTextMask(text, refs)) {
+          return '[' + text.replace(MASK_REFLINK_SEARCH, maskReflink) + '][' +
+            'a'.repeat(m.length - refStart - 2) + ']';
+        }
+      }
+      return '[' + 'a'.repeat(m.length - 2) + ']';
+    };
+    masked = masked.replace(MASK_REFLINK_SEARCH, maskReflink);
+  }
+  masked = masked.replace(MASK_ANY_PUNCT_OUTSIDE_CODE, (m, code, punct) => {
+    if (punct) return '+'.repeat(m.length);
+    if (code) return code + m.slice(code.length, -code.length).replace(/`/g, '+') + code;
+    return m;
+  });
+  masked = masked.replace(MASK_BLOCK_SKIP, (m, _a, context) => {
+    const offset = context ? context.length : 0;
+    return m.slice(0, offset) + '[' + 'a'.repeat(m.length - offset - 2) + ']';
+  });
+  return masked;
+}
+
 function scanInline(s, refs) {
   const nodes = [];
   const stack = []; // {nodeIdx, img, active, srcIdx}
@@ -1609,13 +1668,13 @@ function scanInline(s, refs) {
   while (i < n) {
     const ch = s[i];
     // --- extended autolinks (www. / scheme / email) ---
-    // Suppressed inside an active link label: a link cannot contain a
-    // link, and marked tokenizes labels with inLink set, so a www/email
-    // address inside [label](url) stays plain text. Without this the
-    // autolink swallows the closing ] and the destination, and the link
-    // never forms. Angle autolinks (<...>) are NOT suppressed.
-    const inLabel = stack.length > 0 && stack[stack.length - 1].active;
-    if (!inLabel && !docInLink && (ch === 'w' || isAlpha(ch) || isEmailLocal(ch))) {
+    // Inside a link label, an autolink is allowed only when it ends
+    // before the label's ']' (marked tokenizes a forming link's label
+    // with inLink set, so a URL that would swallow ']' and the
+    // destination stays plain text; but a failed label's URL that ends
+    // before ']' autolinks, per doc-39). Angle autolinks (<...>) are
+    // NOT suppressed.
+    if (!docInLink && (ch === 'w' || isAlpha(ch) || isEmailLocal(ch))) {
       const prev = i > 0 ? s[i - 1] : '';
       if (i === 0 || isWs(prev) || isPunct(prev)) {
         let m = null;
@@ -1641,6 +1700,13 @@ function scanInline(s, refs) {
             (i === 0 || buf === '' || !isBareEmailLocal(s[i - 1]))) {
           const ai = s.indexOf('@', i);
           if (ai !== -1 && ai - i <= 64) m = tryEmail(s, i, openUnderscore);
+        }
+        // Bound the autolink to the label end: if it would reach past
+        // the label's ']', it stays plain text so the link can still
+        // form (see the comment above). An invalid label has no bound.
+        if (m) {
+          const topFrame = stack.length > 0 && stack[stack.length - 1].active ? stack[stack.length - 1] : null;
+          if (topFrame && topFrame.labelEnd >= 0 && m.end > topFrame.labelEnd) m = null;
         }
         if (m) {
           flush();
@@ -1726,7 +1792,7 @@ function scanInline(s, refs) {
         canClose = rightFlank;
       }
       flush();
-      nodes.push({ t: 'd', ch, len: m, canOpen, canClose });
+      nodes.push({ t: 'd', ch, len: m, canOpen, canClose, pos: i });
       if (ch === '_' && canOpen) hasOpenUnderscore = true;
       i += m;
       continue;
@@ -1807,6 +1873,11 @@ function scanInline(s, refs) {
         flush();
         openerNode.href = formed.href;
         openerNode.title = formed.title === undefined ? null : formed.title;
+        // Label source for the emphasis mask: marked tokenizes a link's
+        // label in a nested pass, so delimiters inside it are judged
+        // against the label's own mask, not the outer one.
+        openerNode.labelSrc = s.slice(top.srcIdx + (top.img ? 2 : 1), i);
+        openerNode.labelStart = top.srcIdx + (top.img ? 2 : 1);
         nodes.push({ t: 'close' });
         stack.length = stack.length - 1;
         if (!top.img) { for (const e of stack) if (!e.img) e.active = false; }
@@ -1867,6 +1938,37 @@ function scanInline(s, refs) {
     if (ch === '>') { buf += '&gt;'; i++; continue; }
     buf += ch;
     i++;
+  }
+  // marked's emStrong/del mask, applied after the scan: a delimiter that
+  // falls inside a masked region is not an emphasis delimiter. A
+  // delimiter inside a formed link is judged against that link's own
+  // label mask; all others against the outer mask. Only adds noEm,
+  // never clears the failed-label suppression set above.
+  {
+    let anyDelim = false;
+    for (let k = 0; k < nodes.length; k++) if (nodes[k].t === 'd') { anyDelim = true; break; }
+    if (anyDelim) {
+      let outerMask = null;
+      const active = []; // {labelSrc, labelStart, labelMask}
+      for (let k = 0; k < nodes.length; k++) {
+        const nd = nodes[k];
+        if (nd.t === 'open' && nd.href !== null) {
+          active.push({ labelSrc: nd.labelSrc, labelStart: nd.labelStart, labelMask: null });
+        } else if (nd.t === 'close') {
+          active.pop();
+        } else if (nd.t === 'd' && !nd.noEm) {
+          if (active.length) {
+            const top = active[active.length - 1];
+            if (top.labelMask === null) top.labelMask = maskInlineSrc(top.labelSrc, refs);
+            const lp = nd.pos - top.labelStart;
+            if (lp >= 0 && lp < top.labelSrc.length && top.labelMask[lp] !== top.labelSrc[lp]) nd.noEm = true;
+          } else {
+            if (outerMask === null) outerMask = maskInlineSrc(s, refs);
+            if (outerMask[nd.pos] !== s[nd.pos]) nd.noEm = true;
+          }
+        }
+      }
+    }
   }
   flush();
   return nodes;
