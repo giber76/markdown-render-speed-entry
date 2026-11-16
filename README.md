@@ -4,6 +4,11 @@
 [![rank](https://make.fun/badge/markdown-render-speed-02/giber76/markdown-render-speed-entry/rank.svg)](https://make.fun/bounty/markdown-render-speed-02/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
 [![reward](https://make.fun/badge/markdown-render-speed-02/giber76/markdown-render-speed-entry/reward.svg)](https://make.fun/bounty/markdown-render-speed-02?utm_source=github&utm_medium=readme&utm_campaign=markdown-render-speed-02)
 
+Round-2 rebuild: the inline parser, block renderer, and driver were
+rewritten by hand in a fresh recorded session after the round-1 entry
+was rejected on provenance (not quality), so every counted line is
+authored in that session.
+
 A fast, dependency-free CommonMark 0.31.2 + GFM renderer whose output is
 byte-identical to marked 18.1.3 with default options (GFM on, breaks off).
 Written from scratch for the make.fun `markdown-render-speed-02` bounty.
