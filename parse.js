@@ -1295,9 +1295,9 @@ function renderInlineText(text, refs) {
 }
 
 function renderBlocks(nodes, refs, tight) {
-  let out = '';
-  for (const node of nodes) out += renderBlock(node, refs, tight);
-  return out;
+  const out = [];
+  for (const node of nodes) out.push(renderBlock(node, refs, tight));
+  return out.join('');
 }
 
 function renderBlock(node, refs, tight) {
@@ -1324,34 +1324,34 @@ function renderBlock(node, refs, tight) {
     case 'quote':
       return '<blockquote>\n' + renderBlocks(node.children, refs, false) + '</blockquote>\n';
     case 'list': {
-      let out = node.ordered
+      const out = [node.ordered
         ? (node.start !== 1 ? '<ol start="' + node.start + '">\n' : '<ol>\n')
-        : '<ul>\n';
-      for (const item of node.items) out += renderListItem(item, node, refs);
-      out += node.ordered ? '</ol>\n' : '</ul>\n';
-      return out;
+        : '<ul>\n'];
+      for (const item of node.items) out.push(renderListItem(item, node, refs));
+      out.push(node.ordered ? '</ol>\n' : '</ul>\n');
+      return out.join('');
     }
     case 'table': {
-      let out = '<table>\n<thead>\n<tr>\n';
+      const out = ['<table>\n<thead>\n<tr>\n'];
       for (let c = 0; c < node.header.length; c++) {
         const a = node.aligns[c];
-        out += '<th' + (a ? ' align="' + a + '"' : '') + '>' + renderInline(node.header[c], refs) + '</th>\n';
+        out.push('<th' + (a ? ' align="' + a + '"' : '') + '>' + renderInline(node.header[c], refs) + '</th>\n');
       }
-      out += '</tr>\n</thead>\n';
+      out.push('</tr>\n</thead>\n');
       if (node.rows.length) {
-        out += '<tbody>';
+        out.push('<tbody>');
         for (const row of node.rows) {
-          out += '<tr>\n';
+          out.push('<tr>\n');
           for (let c = 0; c < row.length; c++) {
             const a = node.aligns[c];
-            out += '<td' + (a ? ' align="' + a + '"' : '') + '>' + renderInline(row[c], refs) + '</td>\n';
+            out.push('<td' + (a ? ' align="' + a + '"' : '') + '>' + renderInline(row[c], refs) + '</td>\n');
           }
-          out += '</tr>\n';
+          out.push('</tr>\n');
         }
-        out += '</tbody>';
+        out.push('</tbody>');
       }
-      out += '</table>\n';
-      return out;
+      out.push('</table>\n');
+      return out.join('');
     }
   }
   return '';
@@ -1370,20 +1370,20 @@ function renderListItem(item, list, refs) {
       blocks = [{ t: 'para', text: rest }].concat(blocks.slice(1));
     }
   }
-  let inner = '';
+  const inner = [];
   for (let b = 0; b < blocks.length; b++) {
     const blk = blocks[b];
     if (b === 0 && checkbox) {
       if (blk.t === 'para') {
-        inner += list.tight
+        inner.push(list.tight
           ? checkbox + renderInline(blk.text, refs)
-          : '<p>' + checkbox + renderInline(blk.text, refs) + '</p>\n';
+          : '<p>' + checkbox + renderInline(blk.text, refs) + '</p>\n');
         continue;
       }
     }
-    inner += renderBlock(blk, refs, list.tight);
+    inner.push(renderBlock(blk, refs, list.tight));
   }
-  return '<li>' + inner + '</li>\n';
+  return '<li>' + inner.join('') + '</li>\n';
 }
 
 // ---- inline parsing ----
@@ -1597,66 +1597,70 @@ function parseInlineLink(s, i) {
 
 // ---- marked 18.1.3 emStrong/del masking (regexes from marked's
 // rules.inline.gfm; literals copied verbatim from the 18.1.3 build) ----
-const MASK_REFLINK_SEARCH = /!?\[((?:[^\[\]\\`]*(?:\[(?:\[(?:\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|`+(?!`)[^`]*?`+(?!`)|``+(?=\]))){0,999}?[^\[\]\\`]*?)\]\[((?!\s*\])(?:\\[\s\S]|[^\[\]\\]){1,999})\]|!?\[((?!\s*\])(?:\\[\s\S]|[^\[\]\\]){1,999})\](?:\[\])?(?!\()/g;
 const MASK_ANY_PUNCT_OUTSIDE_CODE = /(`+)(?:[^`]|[^`][\s\S]*?[^`])\1(?!`)|`+|\\([\p{P}\p{S}])/gu;
 const MASK_BLOCK_SKIP = /\[(?:[^\[\]`]|(?<a>`+)[^`]+\k<a>(?!`))*?\]\((?:\\[\s\S]|[^\\\(\)]|\((?:\\[\s\S]|[^\\\(\)])*\))*\)|(?<!`)()(?<b>`+)[^`]+\k<b>(?!`)|<(?! )[^<>]*?>/g;
-const MASK_INLINE_LINK = /^!?\[((?:\[(?:\[(?:\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|[^\[\]\\])*\]|\\[\s\S]|`+(?!`)[^`]*?`+(?!`)|``+(?=\])|[^\[\]\\`])*?)\]\([ \t\n]*(<(?:\\.|[^\n<>\\])+>|[^ \t\n\x00-\x1f]+|(?=\)))(?:(?:[ \t]+(?:\n[ \t]*)?|\n[ \t]*)("(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|\((?:\\[\s\S]|[^)\\])*\)))?[ \t\n]*\)/;
 
-// marked's linkInText: does `text` hold a link (inline or reference)?
-// Used by the mask: a reflink whose text holds a link masks the inner
-// links instead of flattening the whole span.
-function linkInTextMask(text, refs) {
-  if (!text.includes('[')) return false;
-  for (const m of text.matchAll(MASK_BLOCK_SKIP)) {
-    if (MASK_INLINE_LINK.test(m[0]) && text.charAt(m.index - 1) !== '!') return true;
-  }
-  for (const m of text.matchAll(MASK_REFLINK_SEARCH)) {
-    const s = m[0], r = s.lastIndexOf('[');
-    if (!(s.charAt(0) === '!' || !refs.has(normalizeLabel(s.slice(r + 1, -1)))) &&
-        !(r > 1 && linkInTextMask(s.slice(1, r - 1), refs))) return true;
-  }
-  return false;
+// Fast-path tables for scanInline's text-run scan (built once).
+// RUN_STOP[c] = 1 when ASCII char c starts a token in scanInline.
+// WORD_START_AFTER[c] = 1 when a letter after ASCII char c is at a word
+// start (c is whitespace or punctuation), so it may begin an autolink.
+const RUN_STOP = new Uint8Array(128);
+for (const c of '*_~`[]<&"\'\\>\n') RUN_STOP[c.charCodeAt(0)] = 1;
+const WORD_START_AFTER = new Uint8Array(128);
+for (let c = 0; c < 128; c++) {
+  const ch = String.fromCharCode(c);
+  WORD_START_AFTER[c] = (isWs(ch) || isPunct(ch)) ? 1 : 0;
+}
+// ASCII tables for the flanking decisions (delimiter branch, autolink
+// branch): IS_WS_ASCII / IS_PUNCT_ASCII agree with isWs / isPunct on
+// ASCII; non-ASCII chars still go through the functions.
+// IS_EMAIL_LOCAL_ASCII agrees with isEmailLocal (EMAIL_LOCAL is ASCII
+// only, so a non-ASCII char is never email-local). Note 'w' and every
+// alpha char are in EMAIL_LOCAL, so the autolink branch's outer test
+// (ch === 'w' || isAlpha(ch) || isEmailLocal(ch)) is just isEmailLocal.
+const IS_WS_ASCII = new Uint8Array(128);
+const IS_PUNCT_ASCII = new Uint8Array(128);
+const IS_EMAIL_LOCAL_ASCII = new Uint8Array(128);
+for (let c = 0; c < 128; c++) {
+  const ch = String.fromCharCode(c);
+  IS_WS_ASCII[c] = isWs(ch) ? 1 : 0;
+  IS_PUNCT_ASCII[c] = isPunct(ch) ? 1 : 0;
+  IS_EMAIL_LOCAL_ASCII[c] = isEmailLocal(ch) ? 1 : 0;
 }
 
-// marked's maskText (Lexer.ts): replace maskable regions of `src` with
-// '[aaa...]' of the same length, so emphasis only sees delimiters
-// outside them. Steps, in marked's order: (1) defined reflinks,
-// (2) code spans / escapes, (3) inline links / code spans / HTML.
-// A mask can only hide a delimiter when the source holds a backtick, a
-// '[' or a '<'; otherwise it is returned unchanged (cheap guard).
+// marked's maskText, minus its reflink step: that step only masks
+// spans whose reference is defined, i.e. spans that form a link, and
+// delimiters inside a formed link are judged against the link's own
+// label mask by the sweep in scanInline, never against the outer mask
+// (the reference text itself holds no delimiter nodes: the scan jumps
+// past it when the link forms). So the reflink step cannot change any
+// noEm decision here, and it is the most expensive regex — dropping it.
+// The two remaining steps are guarded precisely: anyPunct can only
+// match a backtick or a backslash escape; blockSkip can only match a
+// [...](...) span, a code span, or an HTML tag.
 function maskInlineSrc(src, refs) {
-  if (src.indexOf('`') < 0 && src.indexOf('[') < 0 && src.indexOf('<') < 0) return src;
   let masked = src;
-  if (refs && refs.size > 0 && src.includes('[')) {
-    const maskReflink = (m) => {
-      const refStart = m.lastIndexOf('[');
-      if (!refs.has(normalizeLabel(m.slice(refStart + 1, -1)))) return m;
-      if (refStart > 1 && m.charAt(0) !== '!') {
-        const text = m.slice(1, refStart - 1);
-        if (linkInTextMask(text, refs)) {
-          return '[' + text.replace(MASK_REFLINK_SEARCH, maskReflink) + '][' +
-            'a'.repeat(m.length - refStart - 2) + ']';
-        }
-      }
-      return '[' + 'a'.repeat(m.length - 2) + ']';
-    };
-    masked = masked.replace(MASK_REFLINK_SEARCH, maskReflink);
+  if (src.indexOf('`') >= 0 || src.indexOf('\\') >= 0) {
+    masked = masked.replace(MASK_ANY_PUNCT_OUTSIDE_CODE, (m, code, punct) => {
+      if (punct) return '+'.repeat(m.length);
+      if (code) return code + m.slice(code.length, -code.length).replace(/`/g, '+') + code;
+      return m;
+    });
   }
-  masked = masked.replace(MASK_ANY_PUNCT_OUTSIDE_CODE, (m, code, punct) => {
-    if (punct) return '+'.repeat(m.length);
-    if (code) return code + m.slice(code.length, -code.length).replace(/`/g, '+') + code;
-    return m;
-  });
-  masked = masked.replace(MASK_BLOCK_SKIP, (m, _a, context) => {
-    const offset = context ? context.length : 0;
-    return m.slice(0, offset) + '[' + 'a'.repeat(m.length - offset - 2) + ']';
-  });
+  if (src.indexOf('](') >= 0 || src.indexOf('`') >= 0 || src.indexOf('<') >= 0) {
+    masked = masked.replace(MASK_BLOCK_SKIP, (m, _a, context) => {
+      const offset = context ? context.length : 0;
+      return m.slice(0, offset) + '[' + 'a'.repeat(m.length - offset - 2) + ']';
+    });
+  }
   return masked;
 }
 
 function scanInline(s, refs) {
   const nodes = [];
   const stack = []; // {nodeIdx, img, active, srcIdx}
+  let hasOpen = false; // any '[' opener node (formed link or failed label)
+  let hasDelim = false; // any emphasis delimiter node
   let buf = '';
   // Whether an unmatched '_' opener stands anywhere before the current
   // position (a delimiter node that can open). Maintained incrementally
@@ -1667,6 +1671,35 @@ function scanInline(s, refs) {
   let i = 0;
   while (i < n) {
     const ch = s[i];
+    // Fast path: a run of ordinary text. Scan ahead to the next token
+    // starter, '![' , or word-start letter (which may begin an
+    // autolink) and append the whole run as one slice instead of one
+    // char at a time. A word-start autolink candidate stops the run
+    // only when autolinks are live (docInLink suppresses them); a
+    // letter after a non-ASCII char stops conservatively, since it may
+    // be a word start. If the run is empty the main loop handles ch.
+    // The previous char's code is tracked (pc) so the word-start test
+    // is one array lookup, and the autolink-start test runs only at
+    // word starts (inlined, no call).
+    {
+      let j = i;
+      let pc = j > 0 ? s.charCodeAt(j - 1) : -1;
+      while (j < n) {
+        const code = s.charCodeAt(j);
+        if (code < 128 && RUN_STOP[code]) break;
+        if (code === 33 && s.charCodeAt(j + 1) === 91) break; // '!['
+        if (!docInLink && (pc === -1 || pc >= 128 || WORD_START_AFTER[pc]) &&
+            ((code >= 48 && code <= 57) || (code >= 65 && code <= 90) ||
+             (code >= 97 && code <= 122) || code === 46 || code === 43 || code === 45)) break;
+        pc = code;
+        j++;
+      }
+      if (j > i) {
+        buf += s.slice(i, j);
+        i = j;
+        continue;
+      }
+    }
     // --- extended autolinks (www. / scheme / email) ---
     // Inside a link label, an autolink is allowed only when it ends
     // before the label's ']' (marked tokenizes a forming link's label
@@ -1674,9 +1707,12 @@ function scanInline(s, refs) {
     // destination stays plain text; but a failed label's URL that ends
     // before ']' autolinks, per doc-39). Angle autolinks (<...>) are
     // NOT suppressed.
-    if (!docInLink && (ch === 'w' || isAlpha(ch) || isEmailLocal(ch))) {
-      const prev = i > 0 ? s[i - 1] : '';
-      if (i === 0 || isWs(prev) || isPunct(prev)) {
+    const code = ch.charCodeAt(0);
+    if (!docInLink && code < 128 && IS_EMAIL_LOCAL_ASCII[code] === 1) {
+      const pc = i > 0 ? s.charCodeAt(i - 1) : -1;
+      const atWordStart = i === 0 ||
+        (pc >= 128 ? (isWs(s[i - 1]) || isPunct(s[i - 1])) : WORD_START_AFTER[pc] === 1);
+      if (atWordStart) {
         let m = null;
         if (ch === 'w') m = tryWww(s, i);
         // Whether an unmatched '_' opener stands before this position
@@ -1685,8 +1721,16 @@ function scanInline(s, refs) {
         const openUnderscore = hasOpenUnderscore;
         // Fast guards: a scheme needs ':' within the next 32 chars and
         // an email needs '@' within the next 64; without them the
-        // forward scans walk the whole word for nothing.
-        if (!m && isAlpha(ch)) {
+        // forward scans walk the whole word for nothing. Only words
+        // starting with a scheme initial (h/f/m/x, either case) can be
+        // a scheme at all, so skip the ':' scan for all other words.
+        // (isAlpha / isBareEmailLocal inlined as char-code ranges;
+        // '_' (95) is email-local but not an autolink-start char.)
+        const isAlphaCode = (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+        const isBareLocalCode = isAlphaCode || (code >= 48 && code <= 57) ||
+          code === 46 || code === 95 || code === 43 || code === 45;
+        if (!m && isAlphaCode && (ch === 'h' || ch === 'H' || ch === 'f' || ch === 'F' ||
+            ch === 'm' || ch === 'M' || ch === 'x' || ch === 'X')) {
           const ci = s.indexOf(':', i);
           if (ci !== -1 && ci - i <= 32) m = tryScheme(s, i, openUnderscore);
         }
@@ -1696,10 +1740,21 @@ function scanInline(s, refs) {
         // empty after the delimiter was flushed, so allow it there.
         // An email never starts with '__': that is a strong delimiter,
         // not part of the local part (a single leading '_' is).
-        if (!m && isBareEmailLocal(ch) && !(ch === '_' && s[i + 1] === '_') &&
-            (i === 0 || buf === '' || !isBareEmailLocal(s[i - 1]))) {
-          const ai = s.indexOf('@', i);
-          if (ai !== -1 && ai - i <= 64) m = tryEmail(s, i, openUnderscore);
+        if (!m && isBareLocalCode && !(ch === '_' && s[i + 1] === '_') &&
+            (i === 0 || buf === '' || !((pc >= 48 && pc <= 57) || (pc >= 65 && pc <= 90) ||
+              (pc >= 97 && pc <= 122) || pc === 46 || pc === 95 || pc === 43 || pc === 45))) {
+          // Bounded '@' check: the local part is the isBareEmailLocal
+          // run starting here, so an '@' past its end belongs to a
+          // later word, not this email. Replaces an unbounded indexOf
+          // that scanned the rest of the paragraph for every word.
+          let k = i;
+          while (k < n && k - i < 64) {
+            const c = s.charCodeAt(k);
+            if (!((c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122) ||
+                  c === 46 || c === 95 || c === 43 || c === 45)) break;
+            k++;
+          }
+          if (k < n && s[k] === '@') m = tryEmail(s, i, openUnderscore);
         }
         // Bound the autolink to the label end: if it would reach past
         // the label's ']', it stays plain text so the link can still
@@ -1779,19 +1834,26 @@ function scanInline(s, refs) {
       while (i + m < n && s[i + m] === ch) m++;
       // GFM strikethrough is 1-2 tildes only; a run of 3+ is literal text.
       if (ch === '~' && m > 2) { buf += '~'.repeat(m); i += m; continue; }
-      const prev = i > 0 ? s[i - 1] : '';
-      const next = i + m < n ? s[i + m] : '';
-      const leftFlank = next !== '' && !isWs(next) && (!isPunct(next) || isWs(prev) || isPunct(prev));
-      const rightFlank = prev !== '' && !isWs(prev) && (!isPunct(prev) || isWs(next) || isPunct(next));
+      // Flanking via ASCII tables (isWs('') is true, isPunct('') is
+      // false, so a missing side counts as whitespace, not punctuation).
+      const prevCode = i > 0 ? s.charCodeAt(i - 1) : -1;
+      const nextCode = i + m < n ? s.charCodeAt(i + m) : -1;
+      const prevIsWs = prevCode < 0 || (prevCode < 128 ? IS_WS_ASCII[prevCode] === 1 : isWs(s[i - 1]));
+      const prevIsPunct = prevCode >= 0 && (prevCode < 128 ? IS_PUNCT_ASCII[prevCode] === 1 : isPunct(s[i - 1]));
+      const nextIsWs = nextCode < 0 || (nextCode < 128 ? IS_WS_ASCII[nextCode] === 1 : isWs(s[i + m]));
+      const nextIsPunct = nextCode >= 0 && (nextCode < 128 ? IS_PUNCT_ASCII[nextCode] === 1 : isPunct(s[i + m]));
+      const leftFlank = !nextIsWs && (!nextIsPunct || prevIsWs || prevIsPunct);
+      const rightFlank = !prevIsWs && (!prevIsPunct || nextIsWs || nextIsPunct);
       let canOpen, canClose;
       if (ch === '_') {
-        canOpen = leftFlank && (!rightFlank || isPunct(prev));
-        canClose = rightFlank && (!leftFlank || isPunct(next));
+        canOpen = leftFlank && (!rightFlank || prevIsPunct);
+        canClose = rightFlank && (!leftFlank || nextIsPunct);
       } else {
         canOpen = leftFlank;
         canClose = rightFlank;
       }
       flush();
+      hasDelim = true;
       nodes.push({ t: 'd', ch, len: m, canOpen, canClose, pos: i });
       if (ch === '_' && canOpen) hasOpenUnderscore = true;
       i += m;
@@ -1800,6 +1862,7 @@ function scanInline(s, refs) {
     if (ch === '[' || (ch === '!' && s[i + 1] === '[')) {
       const img = ch === '!';
       flush();
+      hasOpen = true;
       nodes.push({ t: 'open', img, href: null, title: null });
       // The label end per marked's label regex (scanLabelEnd): a code
       // span inside the label may only close within it, and a label
@@ -1971,6 +2034,10 @@ function scanInline(s, refs) {
     }
   }
   flush();
+  // Flags for renderInline's fast paths (extra properties on the array;
+  // the tree builders iterate with for..of and ignore them).
+  nodes.hasOpen = hasOpen;
+  nodes.hasDelim = hasDelim;
   return nodes;
 }
 
@@ -2101,15 +2168,16 @@ function processEmphasis(nodes) {
       nodes.splice(oiIdx + 1, ciIdx - oiIdx - 1, strongNode);
       opener.len -= use;
       closer.len -= consume;
+      // After the splice the opener is still at oiIdx and the closer
+      // has moved to oiIdx + 2 (middle removed, strongNode inserted),
+      // so no indexOf search is needed to remove a used-up delimiter.
       if (opener.len === 0) {
-        const idx = nodes.indexOf(opener);
-        if (idx >= 0) nodes.splice(idx, 1);
+        nodes.splice(oiIdx, 1);
         delims.splice(oi, 1);
         openerRemoved = true;
       }
       if (closer.len === 0) {
-        const idx = nodes.indexOf(closer);
-        if (idx >= 0) nodes.splice(idx, 1);
+        nodes.splice(oiIdx + 2 - (openerRemoved ? 1 : 0), 1);
         delims.splice(di - (openerRemoved ? 1 : 0), 1);
       }
       matched = true;
@@ -2121,58 +2189,78 @@ function processEmphasis(nodes) {
   }
 }
 
-function plainText(nodes) {
-  let out = '';
+function plainTextInto(nodes, out) {
   for (const nd of nodes) {
     switch (nd.t) {
-      case 'txt': out += nd.s; break;
-      case 'd': out += nd.ch.repeat(nd.len); break;
-      case 'code': out += escCode(nd.s); break;
-      case 'html': out += escCode(nd.s); break;
-      case 'em': case 'strong': case 'strike': out += plainText(nd.children); break;
-      case 'link': out += plainText(nd.children); break;
-      case 'img': out += plainText(nd.altNodes); break;
-      case 'alink': case 'xlink': out += nd.label; break;
+      case 'txt': out.push(nd.s); break;
+      case 'd': out.push(nd.ch.repeat(nd.len)); break;
+      case 'code': out.push(escCode(nd.s)); break;
+      case 'html': out.push(escCode(nd.s)); break;
+      case 'em': case 'strong': case 'strike': plainTextInto(nd.children, out); break;
+      case 'link': plainTextInto(nd.children, out); break;
+      case 'img': plainTextInto(nd.altNodes, out); break;
+      case 'alink': case 'xlink': out.push(nd.label); break;
       default: break;
     }
   }
-  return out;
+}
+
+function plainText(nodes) {
+  const out = [];
+  plainTextInto(nodes, out);
+  return out.join('');
+}
+
+// Render into a shared parts array and join once: building the output
+// with += per node allocates a cons-string per append and re-flattens
+// on every parent level; a single join is measurably faster on the
+// long README paragraphs.
+function renderNodesInto(nodes, out) {
+  for (const nd of nodes) {
+    switch (nd.t) {
+      case 'txt': out.push(nd.s); break;
+      case 'd': out.push(nd.ch.repeat(nd.len)); break;
+      case 'code': out.push('<code>', escCode(nd.s), '</code>'); break;
+      case 'html': out.push(nd.s); break;
+      case 'br': out.push('<br>'); break;
+      case 'em': out.push('<em>'); renderNodesInto(nd.children, out); out.push('</em>'); break;
+      case 'strong': out.push('<strong>'); renderNodesInto(nd.children, out); out.push('</strong>'); break;
+      case 'strike': out.push('<del>'); renderNodesInto(nd.children, out); out.push('</del>'); break;
+      case 'link':
+        out.push('<a href="', hrefOf(nd.href), '"');
+        if (nd.title !== null && nd.title !== undefined) out.push(' title="', escAttr(nd.title), '"');
+        out.push('>');
+        renderNodesInto(nd.children, out);
+        out.push('</a>');
+        break;
+      case 'img':
+        out.push('<img src="', hrefOf(nd.href), '" alt="', plainText(nd.altNodes), '"');
+        if (nd.title !== null && nd.title !== undefined) out.push(' title="', escAttr(nd.title), '"');
+        out.push('>');
+        break;
+      case 'alink': case 'xlink':
+        out.push('<a href="', hrefOf(nd.href), '">', nd.label, '</a>');
+        break;
+      default: break;
+    }
+  }
 }
 
 function renderNodes(nodes) {
-  let out = '';
-  for (const nd of nodes) {
-    switch (nd.t) {
-      case 'txt': out += nd.s; break;
-      case 'd': out += nd.ch.repeat(nd.len); break;
-      case 'code': out += '<code>' + escCode(nd.s) + '</code>'; break;
-      case 'html': out += nd.s; break;
-      case 'br': out += '<br>'; break;
-      case 'em': out += '<em>' + renderNodes(nd.children) + '</em>'; break;
-      case 'strong': out += '<strong>' + renderNodes(nd.children) + '</strong>'; break;
-      case 'strike': out += '<del>' + renderNodes(nd.children) + '</del>'; break;
-      case 'link':
-        out += '<a href="' + hrefOf(nd.href) + '"' +
-          (nd.title !== null && nd.title !== undefined ? ' title="' + escAttr(nd.title) + '"' : '') +
-          '>' + renderNodes(nd.children) + '</a>';
-        break;
-      case 'img':
-        out += '<img src="' + hrefOf(nd.href) + '" alt="' + plainText(nd.altNodes) + '"' +
-          (nd.title !== null && nd.title !== undefined ? ' title="' + escAttr(nd.title) + '"' : '') + '>';
-        break;
-      case 'alink': case 'xlink':
-        out += '<a href="' + hrefOf(nd.href) + '">' + nd.label + '</a>';
-        break;
-      default: break;
-    }
-  }
-  return out;
+  const out = [];
+  renderNodesInto(nodes, out);
+  return out.join('');
 }
 
 function renderInline(text, refs) {
   if (!text) return '';
-  const tree = buildTree(scanInline(text, refs));
-  processEmphasis(tree);
+  const nodes = scanInline(text, refs);
+  // Fast paths: with no '[' opener, buildTree is a pure copy of the flat
+  // list (no links to nest, no failed labels to turn back into text);
+  // with no delimiter, processEmphasis is a no-op (it only resolves
+  // emphasis, and there is none anywhere, including inside links).
+  const tree = nodes.hasOpen ? buildTree(nodes) : nodes;
+  if (nodes.hasDelim) processEmphasis(tree);
   return renderNodes(tree);
 }
 
@@ -2185,7 +2273,9 @@ function renderInline(text, refs) {
 let docInLink = false;
 
 export function parse(markdown) {
-  const s = markdown.replace(/\r\n?/g, '\n');
+  // Skip the CR normalisation scan when there is no CR at all (the
+  // usual case): a global regex replace still walks the whole input.
+  const s = markdown.indexOf('\r') >= 0 ? markdown.replace(/\r\n?/g, '\n') : markdown;
   const lines = s.split('\n');
   // A trailing newline does not add a blank line: "a\n" is one line, not
   // two. Without this the phantom "" wrongly terminates HTML blocks.
