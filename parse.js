@@ -764,7 +764,7 @@ function isDelimiterRow(line) {
   return true;
 }
 
-function parseBlocks(lines, refs, inListItem, inContainer, docEndsNL) {
+function parseBlocks(lines, refs, inListItem, inContainer, docEndsNL, lazy) {
   const out = [];
   let i = 0;
   const n = lines.length;
@@ -873,7 +873,11 @@ function parseBlocks(lines, refs, inListItem, inContainer, docEndsNL) {
       }
       let trailingNL;
       if (ht >= 6) trailingNL = !endedByBlank;
-      else trailingNL = j >= n || !isBlank(lines[j]);
+      // A whitespace-only line after the block still leaves a trailing
+      // newline in marked's output; only a truly empty line suppresses
+      // it ("<!--...-->\n \nBar" keeps "\n" after "-->", while
+      // "<!--...-->\n\nBar" does not).
+      else trailingNL = j >= n || lines[j].length > 0;
       // Inside a blockquote/list item, an HTML block that runs to the end
       // of the container's lines carries no trailing newline (marked).
       if (inContainer && j >= n) trailingNL = false;
@@ -887,6 +891,12 @@ function parseBlocks(lines, refs, inListItem, inContainer, docEndsNL) {
     const q = stripQuote(line);
     if (q !== null) {
       const qlines = [q];
+      // Indices of qlines that are lazy continuations: they must not
+      // interrupt the paragraph they continue when the quote's content
+      // is re-parsed. A line that was itself lazy in the outer context
+      // stays lazy inside the quote.
+      const qlazy = new Set();
+      if (lazy && lazy.has(i)) qlazy.add(0);
       let j = i + 1;
       let paraOpen = paraOpenAfter(q, false);
       // Fence state inside the quote: code-block content lines are not
@@ -900,6 +910,7 @@ function parseBlocks(lines, refs, inListItem, inContainer, docEndsNL) {
         const q2 = stripQuote(l2);
         if (q2 !== null) {
           qlines.push(q2);
+          if (lazy && lazy.has(j)) qlazy.add(qlines.length - 1);
           if (inFence) {
             if (isClosingFence(q2, inFence)) inFence = null;
             paraOpen = false;
@@ -925,18 +936,19 @@ function parseBlocks(lines, refs, inListItem, inContainer, docEndsNL) {
           } else {
             qlines.push(l2);
           }
+          qlazy.add(qlines.length - 1);
           j++;
           continue;
         }
         break;
       }
-      out.push({ t: 'quote', children: parseBlocks(qlines, refs, false, true).blocks });
+      out.push({ t: 'quote', children: parseBlocks(qlines, refs, false, true, undefined, qlazy).blocks });
       i = j;
       continue;
     }
     const lm = matchListMarker(s, ind.col);
     if (lm) {
-      const res = parseList(lines, i, lm, refs);
+      const res = parseList(lines, i, lm, refs, lazy);
       out.push(res.node);
       i = res.next;
       continue;
@@ -945,7 +957,7 @@ function parseBlocks(lines, refs, inListItem, inContainer, docEndsNL) {
     // The first line of a list item's paragraph loses its leading
     // whitespace (a tab after the marker leaves partial spaces).
     const firstStrip = (inListItem && i === 0) ? leadingSpaces(line) : 0;
-    const res = parseParagraph(lines, i, refs, inListItem, firstStrip);
+    const res = parseParagraph(lines, i, refs, inListItem, firstStrip, lazy, docEndsNL);
     if (res.node) out.push(res.node);
     i = res.next;
   }
@@ -974,7 +986,7 @@ function paraContStrip(line, firstStrip) {
   return s.slice(strip);
 }
 
-function parseParagraph(lines, i, refs, inListItem, firstStrip) {
+function parseParagraph(lines, i, refs, inListItem, firstStrip, lazy, docEndsNL) {
   const plines = [];
   let j = i;
   const n = lines.length;
@@ -987,6 +999,26 @@ function parseParagraph(lines, i, refs, inListItem, firstStrip) {
   while (j < n) {
     const raw = lines[j];
     if (isBlank(raw)) {
+      // A tab-only line inside a table is a row of empty cells, not a
+      // blank line: marked's table-body check only excludes space-only
+      // lines ( *\n ), so a line of tabs is a table row.
+      if (plines.length >= 2 && isDelimiterRow(plines[1]) && raw.indexOf('\t') >= 0) {
+        plines.push(raw);
+        lastRawIndent = raw.length;
+        j++;
+        continue;
+      }
+      // A trailing space-only line continues the paragraph when the
+      // content does not end with a newline: marked's paragraph regex
+      // only excludes a space-only line when a newline follows it
+      // (cm-241: ">  " leaves a single space as the last line of the
+      // quote's content, and it is paragraph text, not a blank line).
+      if (plines.length > 0 && raw.length > 0 && j === n - 1 && !docEndsNL) {
+        plines.push(inListItem ? paraContStrip(raw, firstStrip) : raw);
+        lastRawIndent = raw.length;
+        j++;
+        continue;
+      }
       if (inListItem && plines.length > 0 && lastRawIndent >= 4) {
         let k = j;
         while (k < n && isBlank(lines[k])) k++;
@@ -1009,6 +1041,10 @@ function parseParagraph(lines, i, refs, inListItem, firstStrip) {
         line = paraContStrip(raw, firstStrip);
       }
     }
+    // A lazy continuation line (consumed as a paragraph continuation by
+    // an outer blockquote or list item) is paragraph text: it cannot
+    // start a new block, a setext heading, or interrupt the paragraph.
+    if (lazy && lazy.has(j)) { plines.push(line); lastRawIndent = ind.col; j++; continue; }
     if (ind.col >= 4) { plines.push(line); lastRawIndent = ind.col; j++; continue; }
     const s = raw.slice(ind.idx);
     const st = matchSetext(s);
@@ -1055,7 +1091,7 @@ function parseParagraph(lines, i, refs, inListItem, firstStrip) {
   return { node: { t: 'para', text }, next: j };
 }
 
-function parseList(lines, i, first, refs) {
+function parseList(lines, i, first, refs, lazy) {
   const n = lines.length;
   // Collect the span of lines belonging to this list. A line belongs to the
   // current item when indented by at least the item's content indent; a
@@ -1128,22 +1164,28 @@ function parseList(lines, i, first, refs) {
       // The first line's content: cut the marker plus its whitespace.
       // cut() (unlike stripCols) removes non-whitespace too, which is
       // what stops the item from re-entering parseList unchanged.
-      cur = { lines: [cut(line, m.contentIndent, 0)], contentIndent: m.contentIndent };
+      cur = { lines: [cut(line, m.contentIndent, 0)], contentIndent: m.contentIndent, lazy: new Set() };
+      if (lazy && lazy.has(k)) cur.lazy.add(0);
       curBlanks = 0;
       continue;
     }
     if (!cur) continue;
     if (isBlank(line)) { curBlanks++; cur.lines.push(''); continue; }
     curBlanks = 0;
-    if (ind.col >= cur.contentIndent) cur.lines.push(cut(line, cur.contentIndent, 0));
-    else cur.lines.push(line); // lazy continuation line, kept verbatim
+    if (ind.col >= cur.contentIndent) {
+      cur.lines.push(cut(line, cur.contentIndent, 0));
+      if (lazy && lazy.has(k)) cur.lazy.add(cur.lines.length - 1);
+    } else {
+      cur.lines.push(line); // lazy continuation line, kept verbatim
+      cur.lazy.add(cur.lines.length - 1);
+    }
   }
   if (cur) items.push(cur);
   // Parse each item's content first: loose is decided by the blocks,
   // not the raw lines, because a blank line inside a paragraph (both
   // sides indented by four or more) does not separate two blocks.
   const parsed = items.map((it) => {
-    const pb = parseBlocks(it.lines, refs, true, true);
+    const pb = parseBlocks(it.lines, refs, true, true, undefined, it.lazy);
     return { blocks: pb.blocks, blankSep: pb.blankSep };
   });
   let loose = blanksBetweenItems;
@@ -1276,13 +1318,26 @@ function stripAutolinkTail(match) {
   }
   const P = '? ! . , : ; * _ ~';
   while (match.length && P.indexOf(match[match.length - 1]) >= 0) match = match.slice(0, -1);
-  let open = 0, close = 0;
-  for (let i = 0; i < match.length; i++) {
-    if (match[i] === '(') open++;
-    else if (match[i] === ')') close++;
-  }
-  while (match.endsWith(')') && close > open) { match = match.slice(0, -1); close--; }
+  // Paren balance is left to backpedalAutolink (it matches balanced
+  // (...) groups and treats a stray ')' as punctuation). Counting every
+  // ')' here miscounts a literal ')' inside the URL (e.g. the ')' in
+  // "...page=4)](./docs/create.md)") and strips the group's closer.
   while (match.length && P.indexOf(match[match.length - 1]) >= 0) match = match.slice(0, -1);
+  return match;
+}
+
+// marked's GFM autolink backpedal: trims a raw URL match to the longest
+// prefix made of non-punctuation runs and balanced (...) groups. This
+// stops a URL before an unclosable '(' (e.g. "...io)](https://...)" ends
+// at "...io)]"), which stripAutolinkTail alone does not do.
+const AUTOLINK_BACKPEDAL = /^(?:[^?!.,:;*_'\"~()&]+|\([^)]*\)|&(?![a-zA-Z0-9]+;$)|[?!.,:;*_'\"~)]+(?!$))+/;
+function backpedalAutolink(match) {
+  let prev;
+  do {
+    prev = match;
+    const m = AUTOLINK_BACKPEDAL.exec(match);
+    match = m ? m[0] : '';
+  } while (match !== prev);
   return match;
 }
 
@@ -1301,12 +1356,12 @@ function tryWww(s, i) {
   if (labels === 0) return null;
   let k = j;
   while (k < s.length && !isSpace(s[k]) && s[k] !== '<' && s[k] !== '>') k++;
-  let match = stripAutolinkTail(s.slice(i, k));
+  let match = backpedalAutolink(stripAutolinkTail(s.slice(i, k)));
   if (match.length <= 4) return null;
   return { text: match, end: i + match.length, href: 'http://' + match };
 }
 
-function tryScheme(s, i) {
+function tryScheme(s, i, openUnderscore) {
   let j = i;
   while (j < s.length && (isAlnum(s[j]) || s[j] === '+' || s[j] === '-' || s[j] === '.')) j++;
   const len = j - i;
@@ -1317,18 +1372,18 @@ function tryScheme(s, i) {
     let k = j + 3;
     while (k < s.length && !isSpace(s[k]) && s[k] !== '<' && s[k] !== '>') k++;
     if (k === j + 3) return null;
-    const match = stripAutolinkTail(s.slice(i, k));
+    const match = backpedalAutolink(stripAutolinkTail(s.slice(i, k)));
     if (match.length <= scheme.length + 3) return null;
     return { text: match, end: i + match.length, href: match };
   }
   if (scheme === 'mailto') {
-    const em = tryEmail(s, j + 1);
+    const em = tryEmail(s, j + 1, openUnderscore);
     if (!em) return null;
     const match = s.slice(i, em.end);
     return { text: match, end: em.end, href: match };
   }
   if (scheme === 'xmpp') {
-    const em = tryEmail(s, j + 1);
+    const em = tryEmail(s, j + 1, openUnderscore);
     if (!em) return null;
     let k = em.end;
     // marked's GFM url: xmpp:email optionally followed by ONE /[A-Za-z0-9@.]+ segment
@@ -1349,7 +1404,7 @@ function isBareEmailLocal(ch) {
   return isAlnum(ch) || ch === '.' || ch === '_' || ch === '+' || ch === '-';
 }
 
-function tryEmail(s, i) {
+function tryEmail(s, i, openUnderscore) {
   let k = i;
   while (k < s.length && isBareEmailLocal(s[k])) k++;
   if (k === i) return null;
@@ -1371,8 +1426,20 @@ function tryEmail(s, i) {
     groups++;
   }
   if (groups < 1) return null;
-  // (?![\w-]): a trailing - or _ (or alnum) voids the autolink entirely
-  if (k < s.length && (isAlnum(s[k]) || s[k] === '_' || s[k] === '-')) return null;
+  // (?![\w-]): a trailing - or _ (or alnum) voids the autolink entirely,
+  // EXCEPT a run of two or more '_' is an emphasis delimiter (the closing
+  // __ of a strong span), and a single trailing '_' is one too when an
+  // unmatched '_' opener stands before the email (the closing '_' of an
+  // "_...email..._" span). The raw string still holds the delimiter, but
+  // the email ends before it.
+  if (k < s.length && (isAlnum(s[k]) || s[k] === '_' || s[k] === '-')) {
+    if (s[k] === '_') {
+      let r = k;
+      while (r < s.length && s[r] === '_') r++;
+      if (r - k >= 2 || openUnderscore) { /* delimiter run: allow */ }
+      else return null;
+    } else return null;
+  }
   const match = s.slice(i, k);
   return { text: match, end: k, href: 'mailto:' + match };
 }
@@ -1450,13 +1517,31 @@ function scanInline(s, refs) {
   while (i < n) {
     const ch = s[i];
     // --- extended autolinks (www. / scheme / email) ---
-    if (ch === 'w' || isAlpha(ch) || isEmailLocal(ch)) {
+    // Suppressed inside an active link label: a link cannot contain a
+    // link, and marked tokenizes labels with inLink set, so a www/email
+    // address inside [label](url) stays plain text. Without this the
+    // autolink swallows the closing ] and the destination, and the link
+    // never forms. Angle autolinks (<...>) are NOT suppressed.
+    const inLabel = stack.length > 0 && stack[stack.length - 1].active;
+    if (!inLabel && !docInLink && (ch === 'w' || isAlpha(ch) || isEmailLocal(ch))) {
       const prev = i > 0 ? s[i - 1] : '';
       if (i === 0 || isWs(prev) || isPunct(prev)) {
         let m = null;
         if (ch === 'w') m = tryWww(s, i);
-        if (!m && isAlpha(ch)) m = tryScheme(s, i);
-        if (!m && isBareEmailLocal(ch) && (i === 0 || !isBareEmailLocal(s[i - 1]))) m = tryEmail(s, i);
+        // Whether an unmatched '_' opener stands before this position
+        // (a delimiter node that can open): a trailing '_' after an
+        // email is then its closing delimiter, not a word character.
+        let openUnderscore = false;
+        for (const nd of nodes) if (nd.t === 'd' && nd.ch === '_' && nd.canOpen) { openUnderscore = true; break; }
+        if (!m && isAlpha(ch)) m = tryScheme(s, i, openUnderscore);
+        // An email is not attempted mid-word (prev char an email-local
+        // char), but a delimiter just consumed as a token (e.g. the __
+        // of __...__) is a token boundary, not part of the word: buf is
+        // empty after the delimiter was flushed, so allow it there.
+        // An email never starts with '__': that is a strong delimiter,
+        // not part of the local part (a single leading '_' is).
+        if (!m && isBareEmailLocal(ch) && !(ch === '_' && s[i + 1] === '_') &&
+            (i === 0 || buf === '' || !isBareEmailLocal(s[i - 1]))) m = tryEmail(s, i, openUnderscore);
         if (m) {
           flush();
           nodes.push({ t: 'xlink', href: m.href, label: escAttr(m.text) });
@@ -1621,7 +1706,14 @@ function scanInline(s, refs) {
         if (e >= 0) { flush(); nodes.push({ t: 'html', s: s.slice(i, e + 1) }); i = e + 1; continue; }
       } else {
         const end = matchHtmlTag(s.slice(i));
-        if (end > 0) { flush(); nodes.push({ t: 'html', s: s.slice(i, i + end) }); i += end; continue; }
+        if (end > 0) {
+          const tag = s.slice(i, i + end);
+          // marked's startATag is /^<a /i (a space, i.e. attributes):
+          // a bare <a> does not set inLink. </a> clears it.
+          if (/^<a[ \t]/i.test(tag)) docInLink = true;
+          else if (/^<\/a[ \t>]/i.test(tag)) docInLink = false;
+          flush(); nodes.push({ t: 'html', s: tag }); i += end; continue;
+        }
       }
       buf += '&lt;';
       i++;
@@ -1675,6 +1767,20 @@ function buildTree(nodes) {
   return root;
 }
 
+// True when a middle (nodes between a single-* opener and closer) holds
+// a ** strong formed from an open-only opener and an ambiguous closer,
+// and the text right after that strong does not start with whitespace.
+// See the note in processEmphasis.
+function isBlockedByStrong(middle) {
+  for (let k = 0; k < middle.length; k++) {
+    const nd = middle[k];
+    if (nd.t !== 'strong' || !nd.oo || !nd.ca) continue;
+    const next = middle[k + 1];
+    if (next && next.t === 'txt' && next.s !== '' && !isWs(next.s[0])) return true;
+  }
+  return false;
+}
+
 // The CommonMark delimiter-stack algorithm, run per inline container.
 function processEmphasis(nodes) {
   for (const nd of nodes) {
@@ -1703,7 +1809,20 @@ function processEmphasis(nodes) {
       const use = (opener.len >= 2 && closer.len >= 2) ? 2 : 1;
       const middle = nodes.slice(oiIdx + 1, ciIdx);
       const tag = closer.ch === '~' ? 'strike' : (use === 2 ? 'strong' : 'em');
-      nodes.splice(oiIdx + 1, ciIdx - oiIdx - 1, { t: tag, children: middle });
+      // marked's *-emphasis quirk: a single-* closer does not match a
+      // single-* opener when, between them, a ** strong was formed from
+      // an opener that can only open (preceded by whitespace) and a
+      // closer that can also open (followed by a non-space), and the
+      // text after that strong does not start with whitespace
+      // ("*a **b**c*" stays literal, "*a **b** c*" forms <em>). The
+      // flags are recorded on the strong node for this check.
+      if (use === 1 && closer.ch === '*' && isBlockedByStrong(middle)) continue;
+      const strongNode = { t: tag, children: middle };
+      if (tag === 'strong' && closer.ch === '*') {
+        strongNode.oo = opener.canOpen && !opener.canClose;
+        strongNode.ca = closer.canOpen && closer.canClose;
+      }
+      nodes.splice(oiIdx + 1, ciIdx - oiIdx - 1, strongNode);
       opener.len -= use;
       closer.len -= use;
       if (opener.len === 0) {
@@ -1783,6 +1902,12 @@ function renderInline(text, refs) {
 
 // ---- entry point ----
 
+// Document-level "inside an <a> tag" flag, mirroring marked's Lexer state.
+// An unclosed inline <a ...> tag disables GFM autolinks (www/scheme/
+// email) in this and all later blocks until a </a> is seen; angle
+// autolinks and explicit [x](url) links are unaffected. Reset per parse.
+let docInLink = false;
+
 export function parse(markdown) {
   const s = markdown.replace(/\r\n?/g, '\n');
   const lines = s.split('\n');
@@ -1790,6 +1915,7 @@ export function parse(markdown) {
   // two. Without this the phantom "" wrongly terminates HTML blocks.
   const docEndsNL = s.endsWith('\n');
   if (docEndsNL) lines.pop();
+  docInLink = false;
   const refs = new Map();
   const blocks = parseBlocks(lines, refs, false, false, docEndsNL).blocks;
   return renderBlocks(blocks, refs, false);
