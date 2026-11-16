@@ -9,6 +9,23 @@ rewritten by hand in a fresh recorded session after the round-1 entry
 was rejected on provenance (not quality), so every counted line is
 authored in that session.
 
+Round-3 (in progress): continued by hand in the same recorded session
+toward 720/720 — exact marked 18.1.3 fence indent compensation (`Dt`,
+character-based, not column-based), link-label code-span rules
+(dirty spans only match at the label end), bare-URL/email gating inside
+link labels, blockquote paragraph continuation past non-fence backtick
+lines, and blank-line handling inside blockquotes, lists, and fences.
+Grade 708/720 at last check; spec fails only cm-412. Round-3 fixes this
+session: table rows now split on every unescaped pipe exactly as
+marked's `de` (code spans do not protect a pipe), and the emphasis
+inner-closer block now scans every delimiter between opener and closer
+(a closer blocked once may only pair onward as a strong). Known hard
+failures left: the emphasis leftover-placement cases, the bare URL in a
+link label whose outer reference does not resolve (doc-39), and the
+context-dependent autolink suppressions (doc-03, doc-06, doc-33) and
+link-label code spans in context (doc-09, doc-16, doc-18, doc-28,
+doc-35).
+
 A fast, dependency-free CommonMark 0.31.2 + GFM renderer whose output is
 byte-identical to marked 18.1.3 with default options (GFM on, breaks off).
 Written from scratch for the make.fun `markdown-render-speed-02` bounty.
